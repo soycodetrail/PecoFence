@@ -12,6 +12,22 @@ function Get-LocalIP {
 }
 
 $flag = "$env:TEMP\pecofence_app_breakdown.flag"
+
+# Self-heal the toggle companion: the fence materializes only this .ps1, so write
+# toggle_res.cmd next to it when missing (fresh installs and other machines work as-is).
+$toggleCmd = Join-Path $PSScriptRoot 'toggle_res.cmd'
+if (-not (Test-Path $toggleCmd)) {
+  @'
+@echo off
+set FLAG=%TEMP%\pecofence_app_breakdown.flag
+if exist "%FLAG%" (
+    del "%FLAG%" >nul 2>&1
+) else (
+    echo 1 > "%FLAG%"
+)
+'@ | Set-Content -Path $toggleCmd -Encoding Ascii
+}
+
 $cores = [System.Environment]::ProcessorCount
 $prevCpu = @{}
 $prevTime = [System.DateTime]::UtcNow
@@ -80,7 +96,10 @@ while ($true) {
     $topApps = $appMetrics | Sort-Object MemMB -Descending | Select-Object -First 6
     foreach ($app in $topApps) {
       $color = if ($app.MemMB -gt 400 -or $app.CpuPct -gt 15) { 'orange' } else { 'gray' }
-      "  $($app.Title) ($($app.MemMB)MB$(if ($app.CpuPct -gt 0) { " CPU:$($app.CpuPct)%" })) | run=killapp.cmd $($app.Pid) refresh=true color=$color icon=❌ tooltip=Click to terminate this app"
+      # NOTE: run= arguments must be spelled param1=/param2=/param3= (the fence parser does
+      # not split on spaces; a bare word turns the whole row into unclickable text), and a
+      # tooltip with spaces must be quoted. Killing goes straight to the system's taskkill.exe.
+      "  $($app.Title) ($($app.MemMB)MB$(if ($app.CpuPct -gt 0) { " CPU:$($app.CpuPct)%" })) | run=taskkill.exe param1=/F param2=/PID param3=$($app.Pid) refresh=true color=$color icon=❌ tooltip=""Click to terminate this app"""
     }
   }
 

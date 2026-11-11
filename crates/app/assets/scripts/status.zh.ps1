@@ -3,18 +3,45 @@
 # 支持点击「内存已用」就地展开/折叠每个打开的应用与资源消耗，支持点击❌一键关闭应用
 
 $flag = "$env:TEMP\pecofence_app_breakdown.flag"
+
+# 自愈物化折叠开关：栅栏只会写出本 .ps1，伴生 cmd 不落盘（新装机/其他机器会缺失），
+# 这里在自身目录补写 toggle_res.cmd，保证 run=toggle_res.cmd 永远可用。
+$toggleCmd = Join-Path $PSScriptRoot 'toggle_res.cmd'
+if (-not (Test-Path $toggleCmd)) {
+  @'
+@echo off
+set FLAG=%TEMP%\pecofence_app_breakdown.flag
+if exist "%FLAG%" (
+    del "%FLAG%" >nul 2>&1
+) else (
+    echo 1 > "%FLAG%"
+)
+'@ | Set-Content -Path $toggleCmd -Encoding Ascii
+}
+
 $cores = [System.Environment]::ProcessorCount
 $prevCpu = @{}
 $prevTime = [System.DateTime]::UtcNow
 
-$ip = (Get-NetIPAddress -AddressFamily IPv4 |
-  Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } |
-  Select-Object -First 1).IPAddress
+# 本机 IP：只认有默认网关、状态 Up 的物理/主用网卡，避免抓到 VMware 等虚拟网卡地址。
+function Get-LocalIP {
+  Get-NetIPConfiguration |
+    Where-Object { $_.NetAdapter.Status -eq 'Up' -and $_.IPv4DefaultGateway } |
+    Sort-Object { -not $_.NetAdapter.ConnectorPresent }, { $_.NetIPv4Interface.InterfaceMetric } |
+    Select-Object -ExpandProperty IPv4Address |
+    Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } |
+    Select-Object -First 1 -ExpandProperty IPAddress
+}
+$ip = '查询中'
+$tick = 0
 
 while ($true) {
   $now = [System.DateTime]::UtcNow
   $dt = ($now - $prevTime).TotalSeconds
   if ($dt -lt 0.5) { $dt = 1.0 }
+
+  if ($tick % 15 -eq 1) { $ip = Get-LocalIP }
+  $tick++
 
   $cpu = [int](Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average
   $os = Get-CimInstance Win32_OperatingSystem
@@ -71,7 +98,9 @@ while ($true) {
     foreach ($app in $topApps) {
       $color = if ($app.MemMB -gt 400 -or $app.CpuPct -gt 15) { 'orange' } else { 'gray' }
       $cpuTxt = if ($app.CpuPct -gt 0) { " CPU:$($app.CpuPct)%" } else { "" }
-      "  $($app.Title) ($($app.MemMB)MB$cpuTxt) | run=killapp.cmd $($app.Pid) refresh=true color=$color icon=❌ tooltip=点击完全关闭此应用"
+      # 注意：run= 的参数必须用 param1=/param2=/param3= 拼写（栅栏解析器不认空格分隔的参数，
+      # 裸词会让整行退化成不可点击文本）；杀进程直接用系统 taskkill.exe，无需任何伴生文件。
+      "  $($app.Title) ($($app.MemMB)MB$cpuTxt) | run=taskkill.exe param1=/F param2=/PID param3=$($app.Pid) refresh=true color=$color icon=❌ tooltip=点击完全关闭此应用"
     }
   }
 
@@ -80,7 +109,13 @@ while ($true) {
   $pct = [int]($c.Free * 100 / ($c.Free + $c.Used))
   "C 盘剩余 $free GB ($pct%) | open=C:\ color=$(if ($pct -lt 10) { 'red' } else { 'green' }) icon=💽"
   "---"
-  "本机 IP $ip | copy=$ip icon=📋 tooltip=点一下复制"
+  if ($ip -eq '查询中') {
+    "本机 IP 查询中… | color=gray icon=📋"
+  } elseif ($ip) {
+    "本机 IP $ip | copy=$ip icon=📋 tooltip=点一下复制"
+  } else {
+    "本机 IP 未联网 | color=gray icon=📋"
+  }
   "打开任务管理器 | run=taskmgr.exe icon=📈"
 
   $prevTime = $now
