@@ -1,12 +1,7 @@
 # <pecofence.type>streamable</pecofence.type>
-# PecoFence script fence example: keeps running and shows the computer's state every 2 seconds.
-# The comment above keeps it running. Each line it prints shows at once; after a ~~~ line
-# the next line starts a new screen in place of the old one.
-# color= colours a row, copy= copies text on a click, open= opens a file or folder, run= runs a
-# program.
-# This PC's IPv4 address on the network: from a connected adapter with a default gateway (an
-# unplugged adapter can keep an old address, virtual networks have none), Wi-Fi and Ethernet
-# before VPNs, then the one Windows uses first.
+# PecoFence PC Status: real-time CPU, RAM, Network and Disk monitoring.
+# Click the 'Memory used' row to toggle breakdown of user applications with 1-click close.
+
 function Get-LocalIP {
   Get-NetIPConfiguration |
     Where-Object { $_.NetAdapter.Status -eq 'Up' -and $_.IPv4DefaultGateway } |
@@ -15,25 +10,80 @@ function Get-LocalIP {
     Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } |
     Select-Object -First 1 -ExpandProperty IPAddress
 }
-# The first screen shows at once and the address comes with the second (the first lookup takes a
-# few seconds); then it is looked up every 30 seconds (a network joined later, another Wi-Fi).
+
+$flag = "$env:TEMP\pecofence_app_breakdown.flag"
+$cores = [System.Environment]::ProcessorCount
+$prevCpu = @{}
+$prevTime = [System.DateTime]::UtcNow
 $ip = 'looking'
 $tick = 0
+
 while ($true) {
+  $now = [System.DateTime]::UtcNow
+  $dt = ($now - $prevTime).TotalSeconds
+  if ($dt -lt 0.5) { $dt = 1.0 }
+
   if ($tick % 15 -eq 1) { $ip = Get-LocalIP }
   $tick++
+
   $cpu = [int](Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average
   $os = Get-CimInstance Win32_OperatingSystem
+  $totalGB = [math]::Round($os.TotalVisibleMemorySize / 1MB, 1)
+  $freeGB = [math]::Round($os.FreePhysicalMemory / 1MB, 1)
+  $usedGB = [math]::Round($totalGB - $freeGB, 1)
   $mem = [int](100 - $os.FreePhysicalMemory * 100 / $os.TotalVisibleMemorySize)
-  # Local drives with a disk in them: removable (2), fixed (3) and RAM disks (6). Network drives
-  # and CD/DVD drives are not asked.
-  $disks = Get-CimInstance Win32_LogicalDisk -Filter 'DriveType = 2 OR DriveType = 3 OR DriveType = 6' |
-    Where-Object { $_.Size -gt 0 } |
-    Sort-Object DeviceID
-  # All values are read before the first line prints, so the screen changes in one go.
+
   $cpuColor = if ($cpu -gt 80) { 'red' } elseif ($cpu -gt 50) { 'orange' } else { 'green' }
+  $memColor = if ($mem -gt 85) { 'red' } elseif ($mem -gt 70) { 'orange' } else { 'green' }
+
   "CPU $cpu% | color=$cpuColor icon=🧠"
-  "Memory used $mem% | color=$(if ($mem -gt 85) { 'red' } else { 'green' }) icon=📊"
+
+  # Clickable Memory row: toggles application breakdown
+  $showApps = Test-Path $flag
+  $memTooltip = if ($showApps) { "Click to collapse application breakdown" } else { "Click to see open applications" }
+  "Memory used $usedGB / $totalGB GB ($mem%) $(if ($showApps) { '▼' } else { '▶' }) | run=toggle_res.cmd color=$memColor icon=📊 tooltip=""$memTooltip"""
+
+  if ($showApps) {
+    "---"
+    "【Running Applications (Click ❌ to Close)】 | color=yellow icon=📱"
+
+    $rawProcs = Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -ne '' }
+    $currentSession = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+
+    $appMetrics = @()
+    foreach ($p in $rawProcs) {
+      if ($p.SessionId -ne $currentSession -or $p.ProcessName -in @('explorer', 'PecoFence', 'Taskmgr')) {
+        continue
+      }
+      $pidNum = $p.Id
+      $memMB = [math]::Round($p.WorkingSet64 / 1MB, 1)
+      $totalSec = $p.TotalProcessorTime.TotalSeconds
+
+      $cpuPct = 0.0
+      if ($prevCpu.ContainsKey($pidNum)) {
+        $dSec = [math]::Max(0.0, ($totalSec - $prevCpu[$pidNum]))
+        $cpuPct = [math]::Round(($dSec / ($dt * $cores)) * 100, 1)
+      }
+      $prevCpu[$pidNum] = $totalSec
+
+      $title = $p.MainWindowTitle.Trim()
+      if ($title.Length -gt 15) { $title = $title.Substring(0, 13) + ".." }
+
+      $appMetrics += [PSCustomObject]@{
+        Pid = $pidNum
+        Title = $title
+        MemMB = $memMB
+        CpuPct = $cpuPct
+      }
+    }
+
+    $topApps = $appMetrics | Sort-Object MemMB -Descending | Select-Object -First 6
+    foreach ($app in $topApps) {
+      $color = if ($app.MemMB -gt 400 -or $app.CpuPct -gt 15) { 'orange' } else { 'gray' }
+      "  $($app.Title) ($($app.MemMB)MB$(if ($app.CpuPct -gt 0) { " CPU:$($app.CpuPct)%" })) | run=killapp.cmd $($app.Pid) color=$color icon=❌ tooltip=Click to terminate this app"
+    }
+  }
+
   "---"
   if ($ip -eq 'looking') {
     "IP address: looking it up… | color=gray icon=📋"
@@ -43,13 +93,19 @@ while ($true) {
     "IP address: not connected | color=gray icon=📋"
   }
   "Open Task Manager | run=taskmgr.exe icon=📈"
-  # The drives come last: when the fence is too short, the last drives are what goes out of view.
+
   "---"
+  $disks = Get-CimInstance Win32_LogicalDisk -Filter 'DriveType = 2 OR DriveType = 3 OR DriveType = 6' |
+    Where-Object { $_.Size -gt 0 } |
+    Sort-Object DeviceID
+
   foreach ($disk in $disks) {
     $free = [int]($disk.FreeSpace / 1GB)
     $pct = [int]($disk.FreeSpace * 100 / $disk.Size)
     "$($disk.DeviceID) free $free GB ($pct%) | open=$($disk.DeviceID)\ color=$(if ($pct -lt 10) { 'red' } else { 'green' }) icon=💽"
   }
+
+  $prevTime = $now
   "~~~"
   Start-Sleep -Seconds 2
 }

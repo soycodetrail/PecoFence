@@ -1,5 +1,5 @@
 @echo off
-set FLAG=%TEMP%\pecofence_res_mode.flag
+set FLAG=%TEMP%\pecofence_app_breakdown.flag
 if exist "%FLAG%" (
     del "%FLAG%" >nul 2>&1
 ) else (
