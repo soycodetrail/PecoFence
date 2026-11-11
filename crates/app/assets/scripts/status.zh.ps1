@@ -1,30 +1,20 @@
-# <pecofence.type>streamable</pecofence.type>
+﻿# <pecofence.type>streamable</pecofence.type>
 # PecoFence 电脑状态栅栏：实时监控系统 CPU、总内存与网络/磁盘状态
-# 支持点击「内存已用」展开查看每个打开的应用及资源消耗，支持点击一键关闭应用
-
-function Get-LocalIP {
-  Get-NetIPConfiguration |
-    Where-Object { $_.NetAdapter.Status -eq 'Up' -and $_.IPv4DefaultGateway } |
-    Sort-Object { -not $_.NetAdapter.ConnectorPresent }, { $_.NetIPv4Interface.InterfaceMetric } |
-    Select-Object -ExpandProperty IPv4Address |
-    Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } |
-    Select-Object -First 1 -ExpandProperty IPAddress
-}
+# 支持点击「内存已用」就地展开/折叠每个打开的应用与资源消耗，支持点击❌一键关闭应用
 
 $flag = "$env:TEMP\pecofence_app_breakdown.flag"
 $cores = [System.Environment]::ProcessorCount
 $prevCpu = @{}
 $prevTime = [System.DateTime]::UtcNow
-$ip = '查找中'
-$tick = 0
+
+$ip = (Get-NetIPAddress -AddressFamily IPv4 |
+  Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } |
+  Select-Object -First 1).IPAddress
 
 while ($true) {
   $now = [System.DateTime]::UtcNow
   $dt = ($now - $prevTime).TotalSeconds
   if ($dt -lt 0.5) { $dt = 1.0 }
-
-  if ($tick % 15 -eq 1) { $ip = Get-LocalIP }
-  $tick++
 
   $cpu = [int](Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average
   $os = Get-CimInstance Win32_OperatingSystem
@@ -36,15 +26,13 @@ while ($true) {
   $cpuColor = if ($cpu -gt 80) { 'red' } elseif ($cpu -gt 50) { 'orange' } else { 'green' }
   $memColor = if ($mem -gt 85) { 'red' } elseif ($mem -gt 70) { 'orange' } else { 'green' }
 
-  # 系统 CPU 行
   "CPU $cpu% | color=$cpuColor icon=🧠"
 
-  # 统计总内存行：添加了 refresh=true，点击后自动刷新栅栏
   $showApps = Test-Path $flag
-  $memTooltip = if ($showApps) { "点击折叠应用明细" } else { "点击展开查看每个打开的应用" }
-  "内存已用 $usedGB / $totalGB GB ($mem%) $(if ($showApps) { '▼' } else { '▶' }) | run=toggle_res.cmd refresh=true color=$memColor icon=📊 tooltip=""$memTooltip"""
+  $arrow = if ($showApps) { '▼' } else { '▶' }
+  $memTip = if ($showApps) { '点击折叠应用明细' } else { '点击查看每个打开的应用' }
+  "内存已用 $usedGB / $totalGB GB ($mem%) $arrow | run=toggle_res.cmd refresh=true color=$memColor icon=📊 tooltip=$memTip"
 
-  # 展开时：列出用户当前打开的应用
   if ($showApps) {
     "---"
     "【正在运行的应用 (点击❌强制关闭)】 | color=yellow icon=📱"
@@ -69,7 +57,7 @@ while ($true) {
       $prevCpu[$pidNum] = $totalSec
 
       $title = $p.MainWindowTitle.Trim()
-      if ($title.Length -gt 15) { $title = $title.Substring(0, 13) + ".." }
+      if ($title.Length -gt 15) { $title = $title.Substring(0, 13) + '..' }
 
       $appMetrics += [PSCustomObject]@{
         Pid = $pidNum
@@ -79,36 +67,21 @@ while ($true) {
       }
     }
 
-    # 按内存大小降序，最多显示 Top 6
     $topApps = $appMetrics | Sort-Object MemMB -Descending | Select-Object -First 6
     foreach ($app in $topApps) {
       $color = if ($app.MemMB -gt 400 -or $app.CpuPct -gt 15) { 'orange' } else { 'gray' }
-      # 添加 refresh=true，关闭进程后自动刷新列表
-      "  $($app.Title) ($($app.MemMB)MB$(if ($app.CpuPct -gt 0) { " CPU:$($app.CpuPct)%" })) | run=killapp.cmd $($app.Pid) refresh=true color=$color icon=❌ tooltip=点击完全关闭此应用"
+      $cpuTxt = if ($app.CpuPct -gt 0) { " CPU:$($app.CpuPct)%" } else { "" }
+      "  $($app.Title) ($($app.MemMB)MB$cpuTxt) | run=killapp.cmd $($app.Pid) refresh=true color=$color icon=❌ tooltip=点击完全关闭此应用"
     }
   }
 
+  $c = Get-PSDrive C
+  $free = [int]($c.Free / 1GB)
+  $pct = [int]($c.Free * 100 / ($c.Free + $c.Used))
+  "C 盘剩余 $free GB ($pct%) | open=C:\ color=$(if ($pct -lt 10) { 'red' } else { 'green' }) icon=💽"
   "---"
-  if ($ip -eq '查找中') {
-    "本机 IP：正在查找… | color=gray icon=📋"
-  } elseif ($ip) {
-    "本机 IP $ip | copy=$ip icon=📋 tooltip=点一下复制"
-  } else {
-    "本机 IP：没有连接网络 | color=gray icon=📋"
-  }
+  "本机 IP $ip | copy=$ip icon=📋 tooltip=点一下复制"
   "打开任务管理器 | run=taskmgr.exe icon=📈"
-
-  # 磁盘驱动器信息
-  "---"
-  $disks = Get-CimInstance Win32_LogicalDisk -Filter 'DriveType = 2 OR DriveType = 3 OR DriveType = 6' |
-    Where-Object { $_.Size -gt 0 } |
-    Sort-Object DeviceID
-
-  foreach ($disk in $disks) {
-    $free = [int]($disk.FreeSpace / 1GB)
-    $pct = [int]($disk.FreeSpace * 100 / $disk.Size)
-    "$($disk.DeviceID.TrimEnd(':')) 盘剩余 $free GB（$pct%） | open=$($disk.DeviceID)\ color=$(if ($pct -lt 10) { 'red' } else { 'green' }) icon=💽"
-  }
 
   $prevTime = $now
   "~~~"
