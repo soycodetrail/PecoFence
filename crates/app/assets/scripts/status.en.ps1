@@ -31,7 +31,7 @@ while ($true) {
   $totalGB = [math]::Round($os.TotalVisibleMemorySize / 1MB, 1)
   $freeGB = [math]::Round($os.FreePhysicalMemory / 1MB, 1)
   $usedGB = [math]::Round($totalGB - $freeGB, 1)
-  $mem = [int](100 - $os.FreePhysicalMemory * 100 / $os.TotalVisibleMemorySize)
+  $mem = [int](100 - ($os.FreePhysicalMemory * 100 / $os.TotalVisibleMemorySize))
 
   $cpuColor = if ($cpu -gt 80) { 'red' } elseif ($cpu -gt 50) { 'orange' } else { 'green' }
   $memColor = if ($mem -gt 85) { 'red' } elseif ($mem -gt 70) { 'orange' } else { 'green' }
@@ -41,7 +41,7 @@ while ($true) {
   # Clickable Memory row: toggles application breakdown
   $showApps = Test-Path $flag
   $memTooltip = if ($showApps) { "Click to collapse application breakdown" } else { "Click to see open applications" }
-  "Memory used $usedGB / $totalGB GB ($mem%) $(if ($showApps) { '▼' } else { '▶' }) | run=toggle_res.cmd color=$memColor icon=📊 tooltip=""$memTooltip"""
+  "Memory used $usedGB / $totalGB GB ($mem%) $(if ($showApps) { '▼' } else { '▶' }) | run=toggle_res.cmd refresh=true color=$memColor icon=📊 tooltip=""$memTooltip"""
 
   if ($showApps) {
     "---"
@@ -80,7 +80,7 @@ while ($true) {
     $topApps = $appMetrics | Sort-Object MemMB -Descending | Select-Object -First 6
     foreach ($app in $topApps) {
       $color = if ($app.MemMB -gt 400 -or $app.CpuPct -gt 15) { 'orange' } else { 'gray' }
-      "  $($app.Title) ($($app.MemMB)MB$(if ($app.CpuPct -gt 0) { " CPU:$($app.CpuPct)%" })) | run=killapp.cmd $($app.Pid) color=$color icon=❌ tooltip=Click to terminate this app"
+      "  $($app.Title) ($($app.MemMB)MB$(if ($app.CpuPct -gt 0) { " CPU:$($app.CpuPct)%" })) | run=killapp.cmd $($app.Pid) refresh=true color=$color icon=❌ tooltip=Click to terminate this app"
     }
   }
 
